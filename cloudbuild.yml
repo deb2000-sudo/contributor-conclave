@@ -95,119 +95,137 @@ steps:
     env:
       - NEXT_TELEMETRY_DISABLED=1
 
+  # node:22's entrypoint is the Node process, so a script step never reaches bash.
+  # Write the image tag with bash, then let the Docker and gcloud images run the same way.
   - id: image-tag
-    name: node:22
-    script: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-      TAG="$SHORT_SHA"
-      if [ -z "$$TAG" ]; then
-        TAG="$BUILD_ID"
-      fi
-      printf 'TAG=%s\n' "$$TAG" > /workspace/.image.env
+    name: bash
+    entrypoint: bash
+    args:
+      - -eu
+      - -c
+      - |
+        tag="${SHORT_SHA}"
+        if [ -z "$$tag" ]; then
+          tag="${BUILD_ID}"
+        fi
+        printf 'TAG=%s\n' "$$tag" > /workspace/.image.env
 
   - id: build-web-image
     name: gcr.io/cloud-builders/docker
-    script: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-      . /workspace/.image.env
-      IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave:$$TAG"
-      docker build -t "$$IMAGE" .
+    entrypoint: bash
+    args:
+      - -eu
+      - -c
+      - |
+        . /workspace/.image.env
+        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave:$$TAG"
+        docker build -t "$$IMAGE" .
 
   - id: build-migrate-image
     name: gcr.io/cloud-builders/docker
-    script: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-      . /workspace/.image.env
-      IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave-migrate:$$TAG"
-      docker build --target migrate -t "$$IMAGE" .
+    entrypoint: bash
+    args:
+      - -eu
+      - -c
+      - |
+        . /workspace/.image.env
+        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave-migrate:$$TAG"
+        docker build --target migrate -t "$$IMAGE" .
 
   - id: push-web-image
     name: gcr.io/cloud-builders/docker
-    script: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-      . /workspace/.image.env
-      docker push "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave:$$TAG"
+    entrypoint: bash
+    args:
+      - -eu
+      - -c
+      - |
+        . /workspace/.image.env
+        docker push "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave:$$TAG"
 
   - id: push-migrate-image
     name: gcr.io/cloud-builders/docker
-    script: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-      . /workspace/.image.env
-      docker push "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave-migrate:$$TAG"
+    entrypoint: bash
+    args:
+      - -eu
+      - -c
+      - |
+        . /workspace/.image.env
+        docker push "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave-migrate:$$TAG"
 
   # Migrate before the new web revision receives traffic.
   # The job reads DATABASE_URL from Secret Manager. This step never prints it.
   - id: migrate
     name: gcr.io/cloud-builders/gcloud
-    script: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-      . /workspace/.image.env
-      IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave-migrate:$$TAG"
-      ACCOUNT="${_RUN_SERVICE_ACCOUNT}@$PROJECT_ID.iam.gserviceaccount.com"
-      INSTANCE="$PROJECT_ID:${_REGION}:${_SQL_INSTANCE}"
-      gcloud run jobs deploy ${_MIGRATION_JOB} \
-        --image "$$IMAGE" \
-        --region ${_REGION} \
-        --project "$PROJECT_ID" \
-        --service-account "$$ACCOUNT" \
-        --set-cloudsql-instances "$$INSTANCE" \
-        --set-secrets "DATABASE_URL=${_DATABASE_SECRET}:latest" \
-        --tasks 1 \
-        --max-retries 0 \
-        --task-timeout 600s \
-        --memory 512Mi \
-        --cpu 1 \
-        --quiet
-      gcloud run jobs execute ${_MIGRATION_JOB} \
-        --region ${_REGION} \
-        --project "$PROJECT_ID" \
-        --wait \
-        --quiet
+    entrypoint: bash
+    args:
+      - -eu
+      - -c
+      - |
+        . /workspace/.image.env
+        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave-migrate:$$TAG"
+        ACCOUNT="${_RUN_SERVICE_ACCOUNT}@$PROJECT_ID.iam.gserviceaccount.com"
+        INSTANCE="$PROJECT_ID:${_REGION}:${_SQL_INSTANCE}"
+        gcloud run jobs deploy ${_MIGRATION_JOB} \
+          --image "$$IMAGE" \
+          --region ${_REGION} \
+          --project "$PROJECT_ID" \
+          --service-account "$$ACCOUNT" \
+          --set-cloudsql-instances "$$INSTANCE" \
+          --set-secrets "DATABASE_URL=${_DATABASE_SECRET}:latest" \
+          --tasks 1 \
+          --max-retries 0 \
+          --task-timeout 600s \
+          --memory 512Mi \
+          --cpu 1 \
+          --quiet
+        gcloud run jobs execute ${_MIGRATION_JOB} \
+          --region ${_REGION} \
+          --project "$PROJECT_ID" \
+          --wait \
+          --quiet
 
   - id: deploy
     name: gcr.io/cloud-builders/gcloud
-    script: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-      . /workspace/.image.env
-      IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave:$$TAG"
-      ACCOUNT="${_RUN_SERVICE_ACCOUNT}@$PROJECT_ID.iam.gserviceaccount.com"
-      INSTANCE="$PROJECT_ID:${_REGION}:${_SQL_INSTANCE}"
-      gcloud run deploy ${_SERVICE} \
-        --image "$$IMAGE" \
-        --region ${_REGION} \
-        --project "$PROJECT_ID" \
-        --service-account "$$ACCOUNT" \
-        --port 8080 \
-        --cpu 1 \
-        --memory ${_MEMORY} \
-        --min-instances ${_MIN_INSTANCES} \
-        --max-instances ${_MAX_INSTANCES} \
-        --concurrency ${_CONCURRENCY} \
-        --set-cloudsql-instances "$$INSTANCE" \
-        --set-secrets "DATABASE_URL=${_DATABASE_SECRET}:latest,GITHUB_TOKEN=${_GITHUB_TOKEN_SECRET}:latest,MESSAGE_ENCRYPTION_KEY=${_MESSAGE_KEY_SECRET}:latest" \
-        --allow-unauthenticated \
-        --ingress all \
-        --quiet
+    entrypoint: bash
+    args:
+      - -eu
+      - -c
+      - |
+        . /workspace/.image.env
+        IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave:$$TAG"
+        ACCOUNT="${_RUN_SERVICE_ACCOUNT}@$PROJECT_ID.iam.gserviceaccount.com"
+        INSTANCE="$PROJECT_ID:${_REGION}:${_SQL_INSTANCE}"
+        gcloud run deploy ${_SERVICE} \
+          --image "$$IMAGE" \
+          --region ${_REGION} \
+          --project "$PROJECT_ID" \
+          --service-account "$$ACCOUNT" \
+          --port 8080 \
+          --cpu 1 \
+          --memory ${_MEMORY} \
+          --min-instances ${_MIN_INSTANCES} \
+          --max-instances ${_MAX_INSTANCES} \
+          --concurrency ${_CONCURRENCY} \
+          --set-cloudsql-instances "$$INSTANCE" \
+          --set-secrets "DATABASE_URL=${_DATABASE_SECRET}:latest,GITHUB_TOKEN=${_GITHUB_TOKEN_SECRET}:latest,MESSAGE_ENCRYPTION_KEY=${_MESSAGE_KEY_SECRET}:latest" \
+          --allow-unauthenticated \
+          --ingress all \
+          --quiet
 
   - id: smoke-test
     name: gcr.io/cloud-builders/gcloud
-    script: |
-      #!/usr/bin/env bash
-      set -euo pipefail
-      URL="$$(gcloud run services describe ${_SERVICE} --region ${_REGION} --project $PROJECT_ID --format='value(status.url)')"
-      for _ in 1 2 3 4 5 6; do
-        if python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=20)' "$$URL/"; then
-          echo "Smoke test returned 200"
-          exit 0
-        fi
-        sleep 5
-      done
-      echo "Smoke test failed"
-      exit 1
+    entrypoint: bash
+    args:
+      - -eu
+      - -c
+      - |
+        URL="$$(gcloud run services describe ${_SERVICE} --region ${_REGION} --project $PROJECT_ID --format='value(status.url)')"
+        for _ in 1 2 3 4 5 6; do
+          if python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=20)' "$$URL/"; then
+            echo "Smoke test returned 200"
+            exit 0
+          fi
+          sleep 5
+        done
+        echo "Smoke test failed"
+        exit 1
