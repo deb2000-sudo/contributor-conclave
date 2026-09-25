@@ -1,0 +1,32 @@
+---
+description: Required test layers and Google Cloud deploy pipeline
+alwaysApply: true
+---
+
+# Testing and deployment
+
+Tests required for new behavior:
+
+- Unit: validators and pure logic (`npm run test:unit`)
+- Integration: database, authorization, mutations (`npm run test:integration`)
+- End-to-end: student, mentor, and admin flows (`npm run test:e2e`)
+
+`npm test` runs all three. `npm run test:coverage` covers unit and integration.
+
+Tests are deterministic. They use the local `contributor_conclave_test` database and a GitHub fixture. They do not use production credentials or the development database.
+
+Local: Docker PostgreSQL, Prisma, `next dev`.
+
+Production pipeline (`cloudbuild.yml`):
+
+1. Install dependencies, lint, typecheck, and unit tests. Fail the build if any fail.
+2. Run integration tests against an ephemeral Postgres container when Cloud Build provides one.
+3. Build the Next.js app and the Docker images.
+4. Push the images to Artifact Registry.
+5. Apply Prisma migrations once, with the `migrate` image, before traffic moves.
+6. Deploy to Cloud Run, attached to Cloud SQL, with secrets from Secret Manager.
+7. Smoke-test the service.
+
+Do not put secret values in `cloudbuild.yml`.
+
+Do not document or configure Vercel as the production host.

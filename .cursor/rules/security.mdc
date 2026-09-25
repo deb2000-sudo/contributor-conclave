@@ -1,0 +1,23 @@
+---
+description: Authentication, authorization, secrets, and GitHub token handling
+alwaysApply: true
+---
+
+# Security
+
+- Authenticate on the server. Authorize every API mutation.
+- Before a read or write, verify resource ownership or an explicit role permission (`STUDENT`, `MENTOR`, `ADMIN`).
+- Validate and authorize on the server. Client checks are not the boundary.
+- Hash passwords with a strong one-way algorithm. Never store or log plaintext passwords.
+- Secrets live in env or the platform secret store. Never commit them.
+- Never put secrets in `NEXT_PUBLIC_*` (those values ship to the browser).
+- GitHub PATs stay on the server. Do not return the token, a prefix, or any field that contains it.
+
+```ts
+// ❌ BAD — token reaches the client
+return { githubToken: process.env.GITHUB_PAT };
+
+// ✅ GOOD — server uses the token; client gets only public data
+const pull = await github.getPullRequest(id);
+return { number: pull.number, title: pull.title };
+```

@@ -1,0 +1,15 @@
+---
+description: Server Components, validation, modules, errors, and logging
+globs: src/**/*.{ts,tsx}
+alwaysApply: false
+---
+
+# Application architecture
+
+- Default to Server Components. Add `"use client"` only for interactivity.
+- Fetch data on the server when the page can render it there.
+- Validate inputs on the server before any mutation or query that uses them.
+- Keep business rules in one module. Do not copy them into a route, action, and client.
+- Prefer small modules and reusable components.
+- Handle errors centrally. Log structured fields (event, request id, user id, role). Never log secrets, passwords, or GitHub tokens.
+- Prisma schema changes require a migration. Do not edit the database by hand.
