@@ -1,0 +1,213 @@
+# Production pipeline for Cloud Build.
+# Project ID comes from the built-in $PROJECT_ID substitution. Do not hardcode one.
+# Secret values are never stored here. Cloud Run reads them from Secret Manager.
+
+substitutions:
+  _REGION: us-central1
+  _AR_REPOSITORY: contributor-conclave
+  _SERVICE: contributor-conclave
+  _MIGRATION_JOB: contributor-conclave-migrate
+  _SQL_INSTANCE: contributor-conclave
+  _RUN_SERVICE_ACCOUNT: contributor-conclave-run
+  _DATABASE_SECRET: contributor-conclave-database-url
+  _GITHUB_TOKEN_SECRET: contributor-conclave-github-token
+  _MESSAGE_KEY_SECRET: contributor-conclave-message-key
+  _MIN_INSTANCES: "0"
+  _MAX_INSTANCES: "10"
+  _CONCURRENCY: "40"
+  _MEMORY: 1Gi
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+timeout: 2400s
+
+steps:
+  - id: install
+    name: node:22
+    entrypoint: npm
+    args: ["ci"]
+
+  - id: prisma-generate
+    name: node:22
+    entrypoint: npx
+    args: ["prisma", "generate"]
+
+  - id: lint
+    name: node:22
+    entrypoint: npm
+    args: ["run", "lint"]
+
+  - id: typecheck
+    name: node:22
+    entrypoint: npm
+    args: ["run", "typecheck"]
+
+  - id: unit-tests
+    name: node:22
+    entrypoint: npm
+    args: ["run", "test:unit"]
+
+  # Ephemeral Postgres for integration tests. This is not Cloud SQL.
+  # The password matches the local test fixture and is not a production secret.
+  - id: start-test-database
+    name: gcr.io/cloud-builders/docker
+    args:
+      - run
+      - -d
+      - --name
+      - cc-postgres
+      - --network
+      - cloudbuild
+      - -e
+      - POSTGRES_USER=postgres
+      - -e
+      - POSTGRES_PASSWORD=postgres
+      - -e
+      - POSTGRES_DB=contributor_conclave_test
+      - postgres:17
+
+  - id: wait-for-test-database
+    name: gcr.io/cloud-builders/docker
+    args:
+      - run
+      - --rm
+      - --network
+      - cloudbuild
+      - postgres:17
+      - bash
+      - -c
+      - for i in $$(seq 1 30); do pg_isready -h cc-postgres -U postgres -d contributor_conclave_test && exit 0; sleep 2; done; exit 1
+
+  - id: integration-tests
+    name: node:22
+    entrypoint: npm
+    args: ["run", "test:integration"]
+    env:
+      - TEST_DATABASE_PROVISIONED=1
+      - TEST_DATABASE_URL=postgresql://postgres:postgres@cc-postgres:5432/contributor_conclave_test
+
+  - id: build-next
+    name: node:22
+    entrypoint: npm
+    args: ["run", "build"]
+    env:
+      - NEXT_TELEMETRY_DISABLED=1
+
+  - id: image-tag
+    name: node:22
+    script: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      TAG="$SHORT_SHA"
+      if [ -z "$$TAG" ]; then
+        TAG="$BUILD_ID"
+      fi
+      printf 'TAG=%s\n' "$$TAG" > /workspace/.image.env
+
+  - id: build-web-image
+    name: gcr.io/cloud-builders/docker
+    script: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      . /workspace/.image.env
+      IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave:$$TAG"
+      docker build -t "$$IMAGE" .
+
+  - id: build-migrate-image
+    name: gcr.io/cloud-builders/docker
+    script: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      . /workspace/.image.env
+      IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave-migrate:$$TAG"
+      docker build --target migrate -t "$$IMAGE" .
+
+  - id: push-web-image
+    name: gcr.io/cloud-builders/docker
+    script: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      . /workspace/.image.env
+      docker push "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave:$$TAG"
+
+  - id: push-migrate-image
+    name: gcr.io/cloud-builders/docker
+    script: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      . /workspace/.image.env
+      docker push "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave-migrate:$$TAG"
+
+  # Migrate before the new web revision receives traffic.
+  # The job reads DATABASE_URL from Secret Manager. This step never prints it.
+  - id: migrate
+    name: gcr.io/cloud-builders/gcloud
+    script: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      . /workspace/.image.env
+      IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave-migrate:$$TAG"
+      ACCOUNT="${_RUN_SERVICE_ACCOUNT}@$PROJECT_ID.iam.gserviceaccount.com"
+      INSTANCE="$PROJECT_ID:${_REGION}:${_SQL_INSTANCE}"
+      gcloud run jobs deploy ${_MIGRATION_JOB} \
+        --image "$$IMAGE" \
+        --region ${_REGION} \
+        --project "$PROJECT_ID" \
+        --service-account "$$ACCOUNT" \
+        --set-cloudsql-instances "$$INSTANCE" \
+        --set-secrets "DATABASE_URL=${_DATABASE_SECRET}:latest" \
+        --tasks 1 \
+        --max-retries 0 \
+        --task-timeout 600s \
+        --memory 512Mi \
+        --cpu 1 \
+        --quiet
+      gcloud run jobs execute ${_MIGRATION_JOB} \
+        --region ${_REGION} \
+        --project "$PROJECT_ID" \
+        --wait \
+        --quiet
+
+  - id: deploy
+    name: gcr.io/cloud-builders/gcloud
+    script: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      . /workspace/.image.env
+      IMAGE="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/contributor-conclave:$$TAG"
+      ACCOUNT="${_RUN_SERVICE_ACCOUNT}@$PROJECT_ID.iam.gserviceaccount.com"
+      INSTANCE="$PROJECT_ID:${_REGION}:${_SQL_INSTANCE}"
+      gcloud run deploy ${_SERVICE} \
+        --image "$$IMAGE" \
+        --region ${_REGION} \
+        --project "$PROJECT_ID" \
+        --service-account "$$ACCOUNT" \
+        --port 8080 \
+        --cpu 1 \
+        --memory ${_MEMORY} \
+        --min-instances ${_MIN_INSTANCES} \
+        --max-instances ${_MAX_INSTANCES} \
+        --concurrency ${_CONCURRENCY} \
+        --set-cloudsql-instances "$$INSTANCE" \
+        --set-secrets "DATABASE_URL=${_DATABASE_SECRET}:latest,GITHUB_TOKEN=${_GITHUB_TOKEN_SECRET}:latest,MESSAGE_ENCRYPTION_KEY=${_MESSAGE_KEY_SECRET}:latest" \
+        --allow-unauthenticated \
+        --ingress all \
+        --quiet
+
+  - id: smoke-test
+    name: gcr.io/cloud-builders/gcloud
+    script: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      URL="$$(gcloud run services describe ${_SERVICE} --region ${_REGION} --project $PROJECT_ID --format='value(status.url)')"
+      for _ in 1 2 3 4 5 6; do
+        if python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=20)' "$$URL/"; then
+          echo "Smoke test returned 200"
+          exit 0
+        fi
+        sleep 5
+      done
+      echo "Smoke test failed"
+      exit 1

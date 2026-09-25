@@ -1,0 +1,18 @@
+---
+description: contributor-conclave purpose, stack, roles, and Google Cloud production target
+alwaysApply: true
+---
+
+# contributor-conclave
+
+Mentorship platform for GitHub contribution and pull-request review. Roles: `STUDENT`, `MENTOR`, `ADMIN`.
+
+Stack: Next.js 16, React, TypeScript strict, Tailwind CSS, PostgreSQL, Prisma, GitHub API. Local database is PostgreSQL in Docker. Production database is Cloud SQL. `DATABASE_URL` selects which one. Do not add a second database.
+
+Production is Google Cloud only:
+
+- Cloud Run runs the app (`0.0.0.0` and `$PORT`)
+- Cloud Build CI/CD via `cloudbuild.yml`
+- Artifact Registry stores images
+
+Do not add Vercel as a deploy target or document Vercel as production. Do not recreate the Next.js app. Canonical spec: `ENGINEERING.md`.

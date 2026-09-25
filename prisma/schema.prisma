@@ -1,0 +1,373 @@
+// PostgreSQL schema for contributor-conclave.
+// Connection URL: prisma.config.ts (DATABASE_URL). No plaintext passwords.
+// Mentor login email is the NxtWave email and lives on User.email.
+// GitHub username lives on GitHubAccount, not on the profiles.
+// Admins have no profile table: User.role = ADMIN is sufficient.
+// The assigned mentor for a submission is the ACTIVE MentorAssignment row,
+// enforced by a partial unique index in the migration.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  STUDENT
+  MENTOR
+  ADMIN
+}
+
+/// Lifecycle of a student pull request. A new submission starts at PENDING in the admin queue.
+enum PRSubmissionStatus {
+  PENDING
+  ASSIGNED
+  IN_REVIEW
+  CHANGES_REQUESTED
+  APPROVED
+  REJECTED
+  CLOSED
+}
+
+enum ReviewState {
+  PENDING
+  APPROVED
+  CHANGES_REQUESTED
+}
+
+enum AssignmentStatus {
+  ACTIVE
+  REASSIGNED
+  CANCELLED
+  COMPLETED
+}
+
+enum ReviewDecision {
+  APPROVED
+  CHANGES_REQUESTED
+}
+
+enum MessageStatus {
+  SENT
+  READ
+}
+
+/// SERVER means the application can decrypt the body for participants. E2EE is reserved for opaque ciphertext.
+/// SERVER storage is not end-to-end encryption.
+enum MessageProtection {
+  SERVER
+  E2EE
+}
+
+enum NotificationType {
+  PR_SUBMITTED
+  MENTOR_ASSIGNED
+  REVIEW_POSTED
+  MESSAGE_RECEIVED
+}
+
+enum AuditAction {
+  MENTOR_ASSIGNED
+  MENTOR_REASSIGNED
+  ASSIGNMENT_CANCELLED
+  USER_ROLE_CHANGED
+  SUBMISSION_CLOSED
+  SUBMISSION_SUBMITTED
+  REVIEW_STARTED
+  REVIEW_POSTED
+  MESSAGE_SENT
+  STUDENT_UPDATED
+  USER_DEACTIVATED
+  USER_REACTIVATED
+  MENTOR_APPROVED
+  MENTOR_REJECTED
+  MENTOR_UPDATED
+  TECH_STACK_CREATED
+  TECH_STACK_UPDATED
+}
+
+enum AuditTargetType {
+  USER
+  PR_SUBMISSION
+  MENTOR_ASSIGNMENT
+  PR_REVIEW
+  TECH_STACK
+}
+
+/// A mentor cannot be assigned until an administrator approves the account.
+enum MentorApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// Login identity. passwordHash is a one-way hash, never a password.
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  role         Role
+  firstName    String   @map("first_name")
+  lastName     String   @map("last_name")
+  email         String    @unique @db.Citext
+  passwordHash  String    @map("password_hash")
+  deactivatedAt DateTime? @map("deactivated_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  studentProfile StudentProfile?
+  mentorProfile  MentorProfile?
+  githubAccount  GitHubAccount?
+  assignmentsMade MentorAssignment[] @relation("AssignmentAssignedBy")
+  sentMessages    Message[]
+  participations  ConversationParticipant[]
+  notifications   Notification[]
+  auditLogs       AuditLog[]
+  sessions        Session[]
+
+  @@index([role])
+  @@index([deactivatedAt])
+  @@index([role, deactivatedAt])
+  @@map("users")
+}
+
+/// Opaque server session. The cookie stores the raw token; only tokenHash is persisted.
+model Session {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  tokenHash String   @unique @map("token_hash")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model StudentProfile {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @unique @map("user_id") @db.Uuid
+  niatId         String   @unique @map("niat_id") @db.Citext
+  batch          String
+  universityName String   @map("university_name")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  submissions PRSubmission[]
+  assignments MentorAssignment[]
+
+  @@index([batch])
+  @@map("student_profiles")
+}
+
+model MentorProfile {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @unique @map("user_id") @db.Uuid
+  employeeId     String               @unique @map("employee_id") @db.Citext
+  batch          String
+  universityName String               @map("university_name")
+  approvalStatus MentorApprovalStatus @default(PENDING) @map("approval_status")
+  createdAt      DateTime             @default(now()) @map("created_at")
+  updatedAt      DateTime             @updatedAt @map("updated_at")
+
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignments MentorAssignment[]
+  reviews     PRReview[]
+  techStacks  MentorTechStack[]
+
+  @@index([batch])
+  @@index([approvalStatus])
+  @@map("mentor_profiles")
+}
+
+model TechStack {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  submissions PRSubmission[]
+  mentors     MentorTechStack[]
+
+  @@map("tech_stacks")
+}
+
+/// Mentors available for a submission are approved accounts linked to its tech stack.
+model MentorTechStack {
+  mentorId    String @map("mentor_id") @db.Uuid
+  techStackId String @map("tech_stack_id") @db.Uuid
+
+  mentor    MentorProfile @relation(fields: [mentorId], references: [id], onDelete: Cascade)
+  techStack TechStack     @relation(fields: [techStackId], references: [id], onDelete: Restrict)
+
+  @@id([mentorId, techStackId])
+  @@index([techStackId])
+  @@map("mentor_tech_stacks")
+}
+
+/// One GitHub login per user. Tokens are never stored here.
+model GitHubAccount {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @unique @map("user_id") @db.Uuid
+  username  String   @unique @db.Citext
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("github_accounts")
+}
+
+model PRSubmission {
+  id           String             @id @default(uuid()) @db.Uuid
+  studentId    String             @map("student_id") @db.Uuid
+  githubPrUrl  String             @unique @map("github_pr_url")
+  repository   String
+  techStackId  String             @map("tech_stack_id") @db.Uuid
+  status       PRSubmissionStatus @default(PENDING)
+  reviewState  ReviewState        @default(PENDING) @map("review_state")
+  submittedAt  DateTime           @default(now()) @map("submitted_at")
+  createdAt    DateTime           @default(now()) @map("created_at")
+  updatedAt    DateTime           @updatedAt @map("updated_at")
+
+  student       StudentProfile             @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  techStack     TechStack                  @relation(fields: [techStackId], references: [id], onDelete: Restrict)
+  assignments   MentorAssignment[]
+  conversation  Conversation?
+  reviews       PRReview[]
+  notifications Notification[]
+
+  @@unique([id, studentId])
+  @@index([studentId, status])
+  @@index([studentId, submittedAt])
+  @@index([techStackId, status])
+  @@index([submittedAt])
+  @@index([repository])
+  @@map("pr_submissions")
+}
+
+/// studentId must match the submission student (composite foreign key).
+/// At most one ACTIVE row per submission (partial unique index in SQL).
+model MentorAssignment {
+  id             String           @id @default(uuid()) @db.Uuid
+  prSubmissionId String           @map("pr_submission_id") @db.Uuid
+  studentId      String           @map("student_id") @db.Uuid
+  mentorId       String           @map("mentor_id") @db.Uuid
+  assignedById   String           @map("assigned_by_id") @db.Uuid
+  status         AssignmentStatus @default(ACTIVE)
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  prSubmission PRSubmission  @relation(fields: [prSubmissionId, studentId], references: [id, studentId], onDelete: Restrict)
+  student      StudentProfile @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  mentor       MentorProfile @relation(fields: [mentorId], references: [id], onDelete: Restrict)
+  assignedBy   User          @relation("AssignmentAssignedBy", fields: [assignedById], references: [id], onDelete: Restrict)
+
+  @@index([prSubmissionId, status])
+  @@index([mentorId, status])
+  @@index([studentId, status])
+  @@index([assignedById])
+  @@map("mentor_assignments")
+}
+
+/// One conversation per pull-request submission.
+model Conversation {
+  id             String   @id @default(uuid()) @db.Uuid
+  prSubmissionId String   @unique @map("pr_submission_id") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  prSubmission PRSubmission              @relation(fields: [prSubmissionId], references: [id], onDelete: Restrict)
+  participants ConversationParticipant[]
+  messages     Message[]
+
+  @@map("conversations")
+}
+
+model ConversationParticipant {
+  id             String    @id @default(uuid()) @db.Uuid
+  conversationId String    @map("conversation_id") @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  lastReadAt     DateTime? @map("last_read_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+  @@map("conversation_participants")
+}
+
+model Message {
+  id             String             @id @default(uuid()) @db.Uuid
+  conversationId String             @map("conversation_id") @db.Uuid
+  senderId       String             @map("sender_id") @db.Uuid
+  /// Opaque payload. SERVER messages are encrypted at rest. E2EE messages stay ciphertext.
+  body           String
+  protection     MessageProtection  @default(SERVER)
+  status         MessageStatus      @default(SENT)
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User         @relation(fields: [senderId], references: [id], onDelete: Restrict)
+
+  @@index([conversationId, createdAt])
+  @@index([senderId, createdAt])
+  @@map("messages")
+}
+
+model PRReview {
+  id             String         @id @default(uuid()) @db.Uuid
+  prSubmissionId String         @map("pr_submission_id") @db.Uuid
+  mentorId       String         @map("mentor_id") @db.Uuid
+  decision       ReviewDecision
+  comment        String
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  prSubmission PRSubmission  @relation(fields: [prSubmissionId], references: [id], onDelete: Restrict)
+  mentor       MentorProfile @relation(fields: [mentorId], references: [id], onDelete: Restrict)
+
+  @@index([prSubmissionId, createdAt])
+  @@index([mentorId, createdAt])
+  @@map("pr_reviews")
+}
+
+/// Append-only. No updatedAt. Do not store secrets in detail.
+model AuditLog {
+  id         String          @id @default(uuid()) @db.Uuid
+  actorId    String          @map("actor_id") @db.Uuid
+  action     AuditAction
+  targetType AuditTargetType @map("target_type")
+  targetId   String          @map("target_id") @db.Uuid
+  detail     String?         @db.VarChar(500)
+  createdAt  DateTime        @default(now()) @map("created_at")
+
+  actor User @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([actorId, createdAt])
+  @@index([targetType, targetId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model Notification {
+  id             String           @id @default(uuid()) @db.Uuid
+  recipientId    String           @map("recipient_id") @db.Uuid
+  type           NotificationType
+  prSubmissionId String?          @map("pr_submission_id") @db.Uuid
+  readAt         DateTime?        @map("read_at")
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  recipient    User          @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  prSubmission PRSubmission? @relation(fields: [prSubmissionId], references: [id], onDelete: SetNull)
+
+  @@index([recipientId, createdAt])
+  @@map("notifications")
+}

@@ -1,0 +1,20 @@
+---
+description: Accessible, responsive UI for contributor-conclave
+globs: src/**/*.tsx
+alwaysApply: false
+---
+
+# UI
+
+- Semantic HTML (`button`, `nav`, `main`, headings in order).
+- Every input has a visible `<label>` or an equivalent accessible name.
+- Interactive elements are reachable and usable by keyboard.
+- Focus styles stay visible. Do not remove outlines without a replacement.
+- Layouts work on narrow and wide viewports.
+- Style with the existing Tailwind v4 setup (`globals.css`). Do not add another CSS framework.
+
+```tsx
+// ✅ GOOD
+<label htmlFor="repo">Repository</label>
+<input id="repo" name="repo" className="focus-visible:outline focus-visible:outline-2" />
+```

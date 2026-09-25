@@ -1,0 +1,32 @@
+# Local PostgreSQL only. Production uses Cloud SQL, not this Compose file.
+#
+# npm run db:up    Start this database in the background.
+# npm run db:down  Stop the container. The named volume keeps the data.
+#                  `docker compose down -v` deletes that data.
+
+name: contributor-conclave
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: contributor-conclave-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: contributor_conclave
+    ports:
+      # Host 5432 must be free. DATABASE_URL in .env.example uses this port.
+      - "5432:5432"
+    volumes:
+      # Postgres 17 stores data here. The named volume survives container restarts.
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d contributor_conclave"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+    name: contributor_conclave_postgres_data
