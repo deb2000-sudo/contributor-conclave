@@ -63,13 +63,21 @@ function readProfileUrl(value: string | undefined, kind: "github" | "linkedin"):
   return url.toString();
 }
 
-export function readAuthorProfile(
-  env: {
-    AUTHOR_NAME?: string;
-    AUTHOR_GITHUB_URL?: string;
-    AUTHOR_LINKEDIN_URL?: string;
-  } = process.env,
-): AuthorProfile {
+type AuthorEnv = {
+  AUTHOR_NAME?: string;
+  AUTHOR_GITHUB_URL?: string;
+  AUTHOR_LINKEDIN_URL?: string;
+};
+
+function authorEnvFromProcess(): AuthorEnv {
+  return {
+    AUTHOR_NAME: process.env.AUTHOR_NAME,
+    AUTHOR_GITHUB_URL: process.env.AUTHOR_GITHUB_URL,
+    AUTHOR_LINKEDIN_URL: process.env.AUTHOR_LINKEDIN_URL,
+  };
+}
+
+export function readAuthorProfile(env: AuthorEnv = authorEnvFromProcess()): AuthorProfile {
   return {
     name: readName(env.AUTHOR_NAME),
     githubUrl: readProfileUrl(env.AUTHOR_GITHUB_URL, "github"),
